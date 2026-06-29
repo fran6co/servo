@@ -426,6 +426,7 @@ pub(crate) struct Document {
     /// Whether the DOMContentLoaded event has already been dispatched.
     /// TODO(43149): Remove when document replacement is implemented
     domcontentloaded_dispatched: Cell<bool>,
+    trigger_complete_after_domcontentloaded: Cell<bool>,
     /// The script element that is currently executing.
     current_script: MutNullableDom<HTMLScriptElement>,
     #[no_trace]
@@ -2069,7 +2070,7 @@ impl Document {
             update_with_current_instant(&self.navigation_timing.top_level_dom_complete);
         }
 
-        if loader.is_blocked() || loader.events_inhibited() {
+        if loader.is_blocked() || loader.events_inhibitied() {
             // Step 6.
             return;
         }
@@ -2285,7 +2286,7 @@ impl Document {
             is_in_delaying_load_events_mode ||
             // In case we have already aborted this document and receive a
             // a subsequent message to load the document
-            self.loader.borrow().events_inhibited();
+            self.loader.borrow().events_inhibitied();
 
         if not_ready_for_load {
             // Step 6.
@@ -2555,23 +2556,23 @@ impl Document {
             self.current_the_end_loading_phase
                 .set(TheEndLoadingPhase::ProcessingAsSoonAsPossibleScripts);
             // TODO(43149): Use `dispatch_dom_content_loaded` when document replacement is implemented
-            self.maybe_dispatch_dom_content_loaded();
+            self.maybe_dispatch_dom_content_loaded(cx);
         }
     }
 
     /// Step 6. of <https://html.spec.whatwg.org/multipage/#the-end>
-    pub(crate) fn maybe_dispatch_dom_content_loaded(&self) {
+    pub(crate) fn maybe_dispatch_dom_content_loaded(&self, cx: &mut JSContext) {
         // TODO(43149): Remove when document replacement is implemented
         if self.domcontentloaded_dispatched.get() {
             return;
         }
         self.domcontentloaded_dispatched.set(true);
 
-        self.dispatch_dom_content_loaded();
+        self.dispatch_dom_content_loaded(cx);
     }
 
     /// Step 6 of <https://html.spec.whatwg.org/multipage/#the-end>
-    fn dispatch_dom_content_loaded(&self) {
+    fn dispatch_dom_content_loaded(&self, cx: &mut JSContext) {
         assert_ne!(
             self.ReadyState(),
             DocumentReadyState::Complete,
@@ -2610,6 +2611,10 @@ impl Document {
             .maybe_set_tti(InteractiveFlag::DOMContentLoaded);
 
         self.wait_until_asap_scripts_have_executed();
+
+        if self.trigger_complete_after_domcontentloaded.get() {
+            self.set_ready_state(cx, DocumentReadyState::Complete);
+        }
     }
 
     fn has_finished_all_asap_scripts(&self) -> bool {
@@ -2672,7 +2677,7 @@ impl Document {
                 update_with_current_instant(&self.navigation_timing.top_level_dom_complete);
             }
 
-            let not_ready_for_load = loader.is_blocked() || loader.events_inhibited();
+            let not_ready_for_load = loader.is_blocked() || loader.events_inhibitied();
             if not_ready_for_load {
                 return;
             }
@@ -2792,7 +2797,7 @@ impl Document {
     /// <https://html.spec.whatwg.org/multipage/#abort-a-document>
     pub(crate) fn abort(&self, cx: &mut JSContext) {
         // We need to inhibit the loader before anything else.
-        self.loader.borrow_mut().inhibit_events();
+        self.loader.borrow_mut().abort();
 
         // Step 1. Assert: this is running as part of a task queued on document's relevant agent's event loop.
         // TODO
@@ -2833,7 +2838,20 @@ impl Document {
             parser.abort(cx);
             // Step 4.3. Make document unsalvageable given document and "parser-aborted".
             self.salvageable.set(false);
+        } else if self.ready_state.get() == DocumentReadyState::Interactive {
+            if self.domcontentloaded_dispatched.get() {
+                self.set_ready_state(cx, DocumentReadyState::Complete);
+            } else {
+                self.trigger_complete_after_domcontentloaded.set(true);
+            }
         }
+
+        self.send_to_embedder(EmbedderMsg::NotifyLoadStatusChanged(
+            self.webview_id(),
+            LoadStatus::Stopped,
+        ));
+
+        self.window().allow_layout_if_necessary(cx);
     }
 
     /// <https://html.spec.whatwg.org/multipage/#abort-a-document-and-its-descendants>
@@ -3170,7 +3188,7 @@ impl Document {
         if self.window().font_context().web_fonts_still_loading() != 0 {
             return false;
         }
-        if self.ReadyState() != DocumentReadyState::Complete {
+        if self.ReadyState() != DocumentReadyState::Complete && !self.loader().aborted() {
             return false;
         }
         if !self.restyle_reason().is_empty() {
@@ -3778,6 +3796,7 @@ impl Document {
             stylesheet_list: MutNullableDom::new(None),
             ready_state: Cell::new(ready_state),
             domcontentloaded_dispatched: Cell::new(domcontentloaded_dispatched),
+            trigger_complete_after_domcontentloaded: Cell::new(false),
             current_script: Default::default(),
             current_the_end_loading_phase: Default::default(),
             pending_parsing_blocking_script: Default::default(),

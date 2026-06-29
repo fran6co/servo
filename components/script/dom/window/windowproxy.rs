@@ -425,7 +425,7 @@ impl WindowProxy {
     pub(crate) fn stop_delaying_load_events_mode(&self) {
         self.delaying_load_events_mode.set(false);
         if let Some(document) = self.document() &&
-            !document.loader().events_inhibited()
+            !document.loader().events_inhibitied()
         {
             ScriptThread::mark_document_with_no_blocked_loads(&document);
         }

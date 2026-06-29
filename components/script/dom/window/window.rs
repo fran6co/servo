@@ -228,6 +228,7 @@ const INITIAL_REFLOW_DELAY: Duration = Duration::from_millis(200);
 ///    to show the user that the page is loading.
 ///  - Script triggers a layout query or scroll event in which case, we want to layout
 ///    but not display the contents.
+///  - The embedder or script aborted the document load.
 ///
 /// For more information see: <https://github.com/servo/servo/pull/6028>.
 #[derive(Clone, Copy, MallocSizeOf)]
@@ -239,12 +240,12 @@ enum LayoutBlocker {
     /// The body finished parsing and the `load` event has been fired or parsing took so
     /// long, that we are going to do layout anyway. Note that subsequent changes to the body
     /// can trigger parsing again, but the `Window` stays in this state.
-    FiredLoadEventOrParsingTimerExpired,
+    FiredLoadEventOrParsingTimerExpiredOrStopped,
 }
 
 impl LayoutBlocker {
     fn layout_blocked(&self) -> bool {
-        !matches!(self, Self::FiredLoadEventOrParsingTimerExpired)
+        !matches!(self, Self::FiredLoadEventOrParsingTimerExpiredOrStopped)
     }
 }
 
@@ -2677,7 +2678,7 @@ impl Window {
         }
 
         let document = self.Document();
-        if document.ReadyState() != DocumentReadyState::Complete {
+        if document.ReadyState() != DocumentReadyState::Complete && !document.loader().aborted() {
             return;
         }
 
@@ -2761,13 +2762,13 @@ impl Window {
     pub(crate) fn allow_layout_if_necessary(&self, cx: &mut JSContext) {
         if matches!(
             self.layout_blocker.get(),
-            LayoutBlocker::FiredLoadEventOrParsingTimerExpired
+            LayoutBlocker::FiredLoadEventOrParsingTimerExpiredOrStopped
         ) {
             return;
         }
 
         self.layout_blocker
-            .set(LayoutBlocker::FiredLoadEventOrParsingTimerExpired);
+            .set(LayoutBlocker::FiredLoadEventOrParsingTimerExpiredOrStopped);
 
         // We do this immediately instead of scheduling a future task, because this can
         // happen if parsing is taking a very long time, which means that the

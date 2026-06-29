@@ -128,7 +128,7 @@ impl WebViewDelegate for WebViewDelegateImpl {
     }
 
     fn notify_load_status_changed(&self, _webview: WebView, status: LoadStatus) {
-        if status == LoadStatus::Complete {
+        if matches!(status, LoadStatus::Complete | LoadStatus::Stopped) {
             self.load_status_changed.set(true);
         }
     }
