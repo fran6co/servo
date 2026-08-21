@@ -48,6 +48,8 @@ pub use paint::WebRenderDebugOption;
 pub use paint_api::rendering_context::{
     OffscreenRenderingContext, RenderingContext, SoftwareRenderingContext, WindowRenderingContext,
 };
+#[cfg(all(unix, not(target_vendor = "apple"), not(target_os = "android")))]
+pub use paint_api::rendering_context::SharedRenderingContext;
 // Expose our profile traits for servoshell, so we can instrument code there, but don't
 // add it as an official API.
 #[doc(hidden)]

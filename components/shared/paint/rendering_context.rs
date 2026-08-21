@@ -5,6 +5,7 @@
 #![deny(unsafe_code)]
 
 use std::cell::{Cell, RefCell, RefMut};
+use std::ffi::c_void;
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -19,7 +20,9 @@ use image::RgbaImage;
 use log::{debug, trace, warn};
 use raw_window_handle::{DisplayHandle, WindowHandle};
 pub use surfman::Error;
-use surfman::chains::{PreserveBuffer, SwapChain};
+use surfman::chains::{PreserveBuffer, SwapChain, SwapChainAPI};
+#[cfg(all(unix, not(target_vendor = "apple"), not(target_os = "android")))]
+use surfman::mesa_surfaceless::context::NativeContext as SurfacelessNativeContext;
 use surfman::{
     Adapter, Connection, Context, ContextAttributeFlags, ContextAttributes, Device, GLApi,
     GLVersion, NativeContext, NativeWidget, Surface, SurfaceAccess, SurfaceInfo, SurfaceTexture,
@@ -80,6 +83,11 @@ pub trait RenderingContext {
     fn connection(&self) -> Option<Connection> {
         None
     }
+    /// The OpenGL texture holding the most recently presented frame, for contexts that render into
+    /// one that the embedder can sample. Default to `None`.
+    fn front_texture(&self) -> Option<u32> {
+        None
+    }
     /// Return the [`RefreshDriver`] for this [`RenderingContext`]. If `None` is returned,
     /// then the default timer-based [`RefreshDriver`] will be used.
     fn refresh_driver(&self) -> Option<Rc<dyn RefreshDriver>> {
@@ -100,6 +108,7 @@ struct SurfmanRenderingContext {
     glow_gl: Arc<glow::Context>,
     device: RefCell<Device>,
     context: RefCell<Context>,
+    shared_context: RefCell<Option<Context>>,
     refresh_driver: Option<Rc<dyn RefreshDriver>>,
 }
 
@@ -108,6 +117,9 @@ impl Drop for SurfmanRenderingContext {
         let device = &mut self.device.borrow_mut();
         let context = &mut self.context.borrow_mut();
         let _ = device.destroy_context(context);
+        if let Some(shared_context) = self.shared_context.borrow_mut().as_mut() {
+            let _ = device.destroy_context(shared_context);
+        }
     }
 }
 
@@ -116,6 +128,15 @@ impl SurfmanRenderingContext {
         connection: &Connection,
         adapter: &Adapter,
         refresh_driver: Option<Rc<dyn RefreshDriver>>,
+    ) -> Result<Self, Error> {
+        Self::new_shared(connection, adapter, refresh_driver, None)
+    }
+
+    fn new_shared(
+        connection: &Connection,
+        adapter: &Adapter,
+        refresh_driver: Option<Rc<dyn RefreshDriver>>,
+        share_with: Option<NativeContext>,
     ) -> Result<Self, Error> {
         let device = connection.create_device(adapter)?;
 
@@ -130,8 +151,16 @@ impl SurfmanRenderingContext {
         let context_descriptor =
             device.create_context_descriptor(&ContextAttributes { flags, version })?;
 
+        #[expect(unsafe_code)]
+        let shared_context = match share_with {
+            Some(native_context) => {
+                Some(unsafe { device.create_context_from_native_context(native_context)? })
+            },
+            None => None,
+        };
+
         let context = device
-            .create_context(&context_descriptor, None)
+            .create_context(&context_descriptor, shared_context.as_ref())
             .inspect_err(|_| {
                 print_diagnostics_information_on_context_creation_failure(&device, gl_api, version)
             })?;
@@ -160,6 +189,7 @@ impl SurfmanRenderingContext {
             glow_gl: Arc::new(glow_gl),
             device: RefCell::new(device),
             context: RefCell::new(context),
+            shared_context: RefCell::new(shared_context),
             refresh_driver,
         })
     }
@@ -168,6 +198,12 @@ impl SurfmanRenderingContext {
         let device = &mut self.device.borrow_mut();
         let context = &self.context.borrow();
         device.create_surface(context, SurfaceAccess::GPUOnly, surface_type)
+    }
+
+    fn destroy_surface(&self, mut surface: Surface) {
+        let device = &self.device.borrow();
+        let context = &mut self.context.borrow_mut();
+        let _ = device.destroy_surface(context, &mut surface);
     }
 
     fn bind_surface(&self, surface: Surface) -> Result<(), Error> {
@@ -393,6 +429,275 @@ impl RenderingContext for SoftwareRenderingContext {
 
     fn connection(&self) -> Option<Connection> {
         self.surfman_rendering_info.connection()
+    }
+}
+
+/// A [`RenderingContext`] that renders offscreen on a GPU context created in the same share group
+/// as a context the embedder already owns, so that the embedder can sample what Servo rendered as
+/// one of its own OpenGL textures, and Servo can sample the embedder's textures, without a copy.
+///
+/// The presented frame is available as an OpenGL texture from
+/// [`SharedRenderingContext::front_texture`].
+#[cfg(all(unix, not(target_vendor = "apple"), not(target_os = "android")))]
+pub struct SharedRenderingContext {
+    size: Cell<PhysicalSize<u32>>,
+    surfman_rendering_info: SurfmanRenderingContext,
+    swap_chain: SwapChain<Device>,
+    /// The presented frames, copied out of the swap chain surfaces so those can go straight back
+    /// to being rendered into. The embedder samples these from another thread at its own pace, so
+    /// there are a few, cycled through.
+    copies: RefCell<CopiedFrames>,
+}
+
+#[derive(Default)]
+struct CopiedFrames {
+    textures: [u32; 3],
+    framebuffers: [u32; 2],
+    size: PhysicalSize<u32>,
+    current: usize,
+}
+
+#[cfg(all(unix, not(target_vendor = "apple"), not(target_os = "android")))]
+impl SharedRenderingContext {
+    /// Creates a context that shares with the embedder's EGL context, given its `EGLContext` and
+    /// the `EGLSurface`s attached to it.
+    ///
+    /// # Safety
+    /// The embedder's context must be live, on the same EGL display this process renders with, and
+    /// it must outlive the returned [`SharedRenderingContext`].
+    #[expect(unsafe_code)]
+    pub unsafe fn from_egl_context(
+        egl_context: *mut c_void,
+        egl_read_surface: *mut c_void,
+        egl_draw_surface: *mut c_void,
+        size: PhysicalSize<u32>,
+    ) -> Result<Self, Error> {
+        let native_context = NativeContext::Alternate(SurfacelessNativeContext {
+            egl_context,
+            egl_read_surface,
+            egl_draw_surface,
+        });
+
+        if size.width == 0 || size.height == 0 {
+            log::error!(
+                "Unable to create SharedRenderingContext with size under 1x1 ({size:?} provided)"
+            );
+            return Err(Error::Failed);
+        }
+
+        let connection = Connection::new()?;
+        let adapter = connection.create_adapter()?;
+        let surfman_rendering_info =
+            SurfmanRenderingContext::new_shared(&connection, &adapter, None, Some(native_context))?;
+
+        let surfman_size = Size2D::new(size.width as i32, size.height as i32);
+        let surface =
+            surfman_rendering_info.create_surface(SurfaceType::Generic { size: surfman_size })?;
+        surfman_rendering_info.bind_surface(surface)?;
+        surfman_rendering_info.make_current()?;
+
+        let swap_chain = surfman_rendering_info.create_attached_swap_chain()?;
+        Ok(SharedRenderingContext {
+            size: Cell::new(size),
+            surfman_rendering_info,
+            swap_chain,
+            copies: RefCell::new(CopiedFrames::default()),
+        })
+    }
+}
+
+#[cfg(all(unix, not(target_vendor = "apple"), not(target_os = "android")))]
+impl Drop for SharedRenderingContext {
+    fn drop(&mut self) {
+        {
+            let copies = self.copies.borrow();
+            let gl = &self.surfman_rendering_info.gleam_gl;
+            for texture in copies.textures {
+                if texture != 0 {
+                    gl.delete_textures(&[texture]);
+                }
+            }
+            if copies.framebuffers[0] != 0 {
+                gl.delete_framebuffers(&copies.framebuffers);
+            }
+        }
+
+        let device = &mut self.surfman_rendering_info.device.borrow_mut();
+        let context = &mut self.surfman_rendering_info.context.borrow_mut();
+        let _ = self.swap_chain.destroy(device, context);
+    }
+}
+
+#[cfg(all(unix, not(target_vendor = "apple"), not(target_os = "android")))]
+impl RenderingContext for SharedRenderingContext {
+    fn prepare_for_rendering(&self) {
+        self.surfman_rendering_info.prepare_for_rendering();
+    }
+
+    fn read_to_image(&self, source_rectangle: DeviceIntRect) -> Option<RgbaImage> {
+        self.surfman_rendering_info.read_to_image(source_rectangle)
+    }
+
+    fn size(&self) -> PhysicalSize<u32> {
+        self.size.get()
+    }
+
+    fn resize(&self, size: PhysicalSize<u32>) {
+        assert!(
+            size.width > 0 && size.height > 0,
+            "Dimensions must be at least 1x1, got {size:?}",
+        );
+
+        if self.size.get() == size {
+            return;
+        }
+
+        self.size.set(size);
+
+        let device = &mut self.surfman_rendering_info.device.borrow_mut();
+        let context = &mut self.surfman_rendering_info.context.borrow_mut();
+        let size = Size2D::new(size.width as i32, size.height as i32);
+        let _ = self.swap_chain.resize(device, context, size);
+    }
+
+    fn present(&self) {
+        {
+            let device = &mut self.surfman_rendering_info.device.borrow_mut();
+            let context = &mut self.surfman_rendering_info.context.borrow_mut();
+            let _ = self
+                .swap_chain
+                .swap_buffers(device, context, PreserveBuffer::No);
+        }
+
+        // The frame is copied out of the surface, in this same context, so the surface can go
+        // straight back into the swap chain: rendering into it again is ordered after the copy by
+        // the context itself. The embedder samples the copy from another thread at its own pace,
+        // which is why a surface must never be recycled while it might still be on screen.
+        let Some(surface) = self.swap_chain.take_pending_surface() else {
+            return;
+        };
+        let Some((surface_texture, surface_texture_id, size)) =
+            self.surfman_rendering_info.create_texture(surface)
+        else {
+            return;
+        };
+
+        let gl = &self.surfman_rendering_info.gleam_gl;
+        {
+            let mut copies = self.copies.borrow_mut();
+            let copy_size = PhysicalSize::new(size.width.max(1) as u32, size.height.max(1) as u32);
+
+            if copies.framebuffers[0] == 0 {
+                let framebuffers = gl.gen_framebuffers(2);
+                copies.framebuffers = [framebuffers[0], framebuffers[1]];
+            }
+
+            if copies.size != copy_size {
+                copies.size = copy_size;
+                for texture in copies.textures {
+                    if texture != 0 {
+                        gl.delete_textures(&[texture]);
+                    }
+                }
+                let textures = gl.gen_textures(3);
+                copies.textures = [textures[0], textures[1], textures[2]];
+                for texture in copies.textures {
+                    gl.bind_texture(gleam::gl::TEXTURE_2D, texture);
+                    gl.tex_image_2d(
+                        gleam::gl::TEXTURE_2D,
+                        0,
+                        gleam::gl::RGBA8 as gleam::gl::GLint,
+                        size.width,
+                        size.height,
+                        0,
+                        gleam::gl::RGBA,
+                        gleam::gl::UNSIGNED_BYTE,
+                        None,
+                    );
+                    gl.tex_parameter_i(
+                        gleam::gl::TEXTURE_2D,
+                        gleam::gl::TEXTURE_MIN_FILTER,
+                        gleam::gl::LINEAR as gleam::gl::GLint,
+                    );
+                    gl.tex_parameter_i(
+                        gleam::gl::TEXTURE_2D,
+                        gleam::gl::TEXTURE_MAG_FILTER,
+                        gleam::gl::LINEAR as gleam::gl::GLint,
+                    );
+                }
+                gl.bind_texture(gleam::gl::TEXTURE_2D, 0);
+            }
+
+            let next = (copies.current + 1) % copies.textures.len();
+            gl.bind_framebuffer(gleam::gl::READ_FRAMEBUFFER, copies.framebuffers[0]);
+            gl.framebuffer_texture_2d(
+                gleam::gl::READ_FRAMEBUFFER,
+                gleam::gl::COLOR_ATTACHMENT0,
+                gleam::gl::TEXTURE_2D,
+                surface_texture_id,
+                0,
+            );
+            gl.bind_framebuffer(gleam::gl::DRAW_FRAMEBUFFER, copies.framebuffers[1]);
+            gl.framebuffer_texture_2d(
+                gleam::gl::DRAW_FRAMEBUFFER,
+                gleam::gl::COLOR_ATTACHMENT0,
+                gleam::gl::TEXTURE_2D,
+                copies.textures[next],
+                0,
+            );
+            gl.blit_framebuffer(
+                0,
+                0,
+                size.width,
+                size.height,
+                0,
+                0,
+                size.width,
+                size.height,
+                gleam::gl::COLOR_BUFFER_BIT,
+                gleam::gl::NEAREST,
+            );
+            gl.bind_framebuffer(gleam::gl::READ_FRAMEBUFFER, 0);
+            gl.bind_framebuffer(gleam::gl::DRAW_FRAMEBUFFER, 0);
+            copies.current = next;
+        }
+
+        if let Some(surface) = self.surfman_rendering_info.destroy_texture(surface_texture) {
+            self.swap_chain.recycle_surface(surface);
+        }
+    }
+
+    fn make_current(&self) -> Result<(), Error> {
+        self.surfman_rendering_info.make_current()
+    }
+
+    fn gleam_gl_api(&self) -> Rc<dyn gleam::gl::Gl> {
+        self.surfman_rendering_info.gleam_gl.clone()
+    }
+
+    fn glow_gl_api(&self) -> Arc<glow::Context> {
+        self.surfman_rendering_info.glow_gl.clone()
+    }
+
+    fn create_texture(
+        &self,
+        surface: Surface,
+    ) -> Option<(SurfaceTexture, u32, UntypedSize2D<i32>)> {
+        self.surfman_rendering_info.create_texture(surface)
+    }
+
+    fn destroy_texture(&self, surface_texture: SurfaceTexture) -> Option<Surface> {
+        self.surfman_rendering_info.destroy_texture(surface_texture)
+    }
+
+    fn connection(&self) -> Option<Connection> {
+        self.surfman_rendering_info.connection()
+    }
+
+    fn front_texture(&self) -> Option<u32> {
+        let copies = self.copies.borrow();
+        let texture = copies.textures[copies.current];
+        (texture != 0).then_some(texture)
     }
 }
 

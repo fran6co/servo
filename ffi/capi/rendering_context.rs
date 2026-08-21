@@ -2,9 +2,12 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::ffi::c_void;
 use std::rc::Rc;
 
 use servo_api::SoftwareRenderingContext;
+#[cfg(all(unix, not(target_vendor = "apple"), not(target_os = "android")))]
+use servo_api::SharedRenderingContext;
 
 /// An opaque struct that abstracts a rendering context used
 /// for managing an OpenGL or GLES rendering context.
@@ -70,3 +73,37 @@ pub unsafe extern "C" fn servo_rendering_context_free(context: *mut RenderingCon
         let _ = Box::from_raw(context);
     }
 }
+
+/// Creates a rendering context that shares with the embedder's EGL context, so that rendered
+/// frames can be handed over as OpenGL textures instead of being copied. `egl_context`,
+/// `egl_read_surface` and `egl_draw_surface` are the embedder's EGL handles.
+///
+/// Returns a newly allocated `RenderingContext` handle, or `NULL` on failure.
+///
+/// # Safety
+/// The embedder's context must be live, on the same EGL display this process renders with, and must
+/// outlive the returned rendering context.
+#[cfg(all(unix, not(target_vendor = "apple"), not(target_os = "android")))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn servo_rendering_context_create_shared_egl(
+    egl_context: *mut c_void,
+    egl_read_surface: *mut c_void,
+    egl_draw_surface: *mut c_void,
+    width: u32,
+    height: u32,
+) -> *mut RenderingContext {
+    let size = dpi::PhysicalSize::new(width, height);
+    match unsafe {
+        SharedRenderingContext::from_egl_context(egl_context, egl_read_surface, egl_draw_surface, size)
+    } {
+        Ok(context) => Box::into_raw(Box::new(RenderingContext {
+            inner: Rc::new(context),
+        })),
+        Err(error) => {
+            log::error!("Failed to create SharedRenderingContext: {error:?}");
+            std::ptr::null_mut()
+        },
+    }
+}
+
+

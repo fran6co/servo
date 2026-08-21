@@ -76,3 +76,15 @@ pub unsafe extern "C" fn servo_webview_present(webview: *mut WebView) {
 
     webview.rendering_context().present();
 }
+/// The OpenGL texture holding the most recently presented frame, or 0 for rendering contexts that
+/// do not render into a texture the embedder can sample.
+///
+/// # Safety
+/// See [`servo_webview_read_frame`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn servo_webview_front_texture(webview: *mut WebView) -> u32 {
+    assert!(!webview.is_null(), "webview pointer must not be null");
+    let webview = unsafe { &*webview };
+
+    webview.rendering_context().front_texture().unwrap_or(0)
+}
