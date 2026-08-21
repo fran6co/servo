@@ -86,6 +86,7 @@ pub unsafe extern "C" fn servo_rendering_context_free(context: *mut RenderingCon
 #[cfg(all(unix, not(target_vendor = "apple"), not(target_os = "android")))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn servo_rendering_context_create_shared_egl(
+    egl_display: *mut c_void,
     egl_context: *mut c_void,
     egl_read_surface: *mut c_void,
     egl_draw_surface: *mut c_void,
@@ -94,7 +95,13 @@ pub unsafe extern "C" fn servo_rendering_context_create_shared_egl(
 ) -> *mut RenderingContext {
     let size = dpi::PhysicalSize::new(width, height);
     match unsafe {
-        SharedRenderingContext::from_egl_context(egl_context, egl_read_surface, egl_draw_surface, size)
+        SharedRenderingContext::from_egl_context(
+            egl_display,
+            egl_context,
+            egl_read_surface,
+            egl_draw_surface,
+            size,
+        )
     } {
         Ok(context) => Box::into_raw(Box::new(RenderingContext {
             inner: Rc::new(context),

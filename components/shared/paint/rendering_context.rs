@@ -22,6 +22,10 @@ use raw_window_handle::{DisplayHandle, WindowHandle};
 pub use surfman::Error;
 use surfman::chains::{PreserveBuffer, SwapChain, SwapChainAPI};
 #[cfg(all(unix, not(target_vendor = "apple"), not(target_os = "android")))]
+use surfman::mesa_surfaceless::connection::{
+    Connection as SurfacelessConnection, NativeConnection as SurfacelessNativeConnection,
+};
+#[cfg(all(unix, not(target_vendor = "apple"), not(target_os = "android")))]
 use surfman::mesa_surfaceless::context::NativeContext as SurfacelessNativeContext;
 use surfman::{
     Adapter, Connection, Context, ContextAttributeFlags, ContextAttributes, Device, GLApi,
@@ -459,14 +463,16 @@ struct CopiedFrames {
 
 #[cfg(all(unix, not(target_vendor = "apple"), not(target_os = "android")))]
 impl SharedRenderingContext {
-    /// Creates a context that shares with the embedder's EGL context, given its `EGLContext` and
-    /// the `EGLSurface`s attached to it.
+    /// Creates a context that shares with the embedder's EGL context, given the `EGLDisplay` it
+    /// lives on, the `EGLContext`, and the `EGLSurface`s attached to it. Contexts can only share
+    /// within one display, so the display has to be the embedder's own rather than one opened here.
     ///
     /// # Safety
-    /// The embedder's context must be live, on the same EGL display this process renders with, and
-    /// it must outlive the returned [`SharedRenderingContext`].
+    /// The handles must be live and initialised, and must outlive the returned
+    /// [`SharedRenderingContext`].
     #[expect(unsafe_code)]
     pub unsafe fn from_egl_context(
+        egl_display: *mut c_void,
         egl_context: *mut c_void,
         egl_read_surface: *mut c_void,
         egl_draw_surface: *mut c_void,
@@ -485,7 +491,11 @@ impl SharedRenderingContext {
             return Err(Error::Failed);
         }
 
-        let connection = Connection::new()?;
+        let connection = Connection::Alternate(unsafe {
+            SurfacelessConnection::from_native_connection(
+                SurfacelessNativeConnection::from_raw_display(egl_display),
+            )?
+        });
         let adapter = connection.create_adapter()?;
         let surfman_rendering_info =
             SurfmanRenderingContext::new_shared(&connection, &adapter, None, Some(native_context))?;
