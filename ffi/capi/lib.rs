@@ -5,6 +5,7 @@
 mod frame;
 mod input;
 mod options;
+mod protocol;
 mod preferences;
 mod rendering_context;
 mod servo;
@@ -35,6 +36,7 @@ pub struct ServoBuilder {
     options: Option<Box<ServoOptions>>,
     event_loop_waker: ServoEventLoopWaker,
     preferences: Option<Box<ServoPreferences>>,
+    protocol_registry: servo_api::protocol_handler::ProtocolRegistry,
 }
 
 /// A callback used by Servo to wake the embedder thread when
@@ -231,6 +233,7 @@ pub unsafe extern "C" fn servo_builder_build(builder: *mut ServoBuilder) -> *mut
     }
 
     rust_builder = rust_builder.event_loop_waker(Box::new(builder.event_loop_waker));
+    rust_builder = rust_builder.protocol_registry(std::mem::take(&mut builder.protocol_registry));
 
     let servo = rust_builder.build();
     Box::into_raw(Box::new(servo))
@@ -255,5 +258,50 @@ pub unsafe extern "C" fn servo_builder_free(builder: *mut ServoBuilder) {
     // for `builder` documented above.
     unsafe {
         let _ = Box::from_raw(builder);
+    }
+}
+
+/// Registers a handler for a custom URL scheme, so that the embedder can serve resources of its own
+/// to the pages it loads.
+///
+/// `scheme` is a NUL terminated UTF-8 string, without the `://` separator. Registering the same
+/// scheme twice, or one of the schemes Servo handles itself, has no effect.
+///
+/// # Safety
+///
+/// The caller must ensure that:
+///
+/// - `builder` is a non-null pointer to a `ServoBuilder` previously returned by
+///   `servo_builder_create` and not yet freed nor passed to another API that takes ownership of it.
+/// - `scheme` is a non-null pointer to a C string that remains unmodified for the duration of the
+///   call.
+/// - `callback` is a valid C ABI function matching the signature shown, remains valid for the
+///   lifetime of the `Servo` instance, is safe to call from any thread, and does not unwind across
+///   the FFI boundary.
+/// - `user_data` is either null or remains valid for the lifetime of the `Servo` instance.
+/// - The `data` and `content_type` a call fills in remain readable until that call returns.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn servo_builder_add_protocol_handler(
+    builder: *mut ServoBuilder,
+    scheme: *const std::ffi::c_char,
+    callback: protocol::ServoProtocolHandlerCallback,
+    user_data: *mut std::ffi::c_void,
+) {
+    assert!(!builder.is_null(), "builder pointer must not be null");
+    assert!(!scheme.is_null(), "scheme pointer must not be null");
+
+    // SAFETY: The caller is assumed to uphold the safety requirements for `builder` and `scheme`
+    // documented above.
+    let builder = unsafe { &mut *builder };
+    let Ok(scheme) = unsafe { std::ffi::CStr::from_ptr(scheme) }.to_str() else {
+        log::error!("servo_builder_add_protocol_handler: scheme is not valid UTF-8");
+        return;
+    };
+
+    if let Err(error) = builder.protocol_registry.register(
+        scheme,
+        protocol::CallbackProtocolHandler::new(callback, user_data),
+    ) {
+        log::error!("Could not register a handler for the {scheme} scheme: {error:?}");
     }
 }
