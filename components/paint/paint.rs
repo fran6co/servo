@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::env;
 use std::fs::create_dir_all;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -21,6 +22,7 @@ use euclid::{Scale, Size2D};
 use image::RgbaImage;
 use ipc_channel::ipc::{self};
 use log::{debug, warn};
+use paint_api::external_images::ExternalImageChannel;
 use paint_api::rendering_context::RenderingContext;
 use paint_api::{
     PaintMessage, PaintProxy, PainterSurfmanDetails, PainterSurfmanDetailsMap,
@@ -93,6 +95,8 @@ pub struct Paint {
     /// An [`EventLoopWaker`] used to wake up the main embedder event loop when the renderer needs
     /// to run.
     pub(crate) event_loop_waker: Box<dyn EventLoopWaker>,
+    /// The textures the embedder wants pages to be able to display.
+    pub(crate) external_image_channel: Arc<ExternalImageChannel>,
 
     /// Tracks whether we are in the process of shutting down, or have shut down and
     /// should shut down `Paint`. This is shared with the `Servo` instance.
@@ -171,6 +175,11 @@ impl Paint {
         );
 
         let webrender_external_image_id_manager = WebRenderExternalImageIdManager::default();
+        // Attached here rather than when a `Painter` is created, so that the embedder can register
+        // textures as soon as it has a `Servo`.
+        state
+            .external_image_channel
+            .attach(webrender_external_image_id_manager.clone());
         let painter_surfman_details_map = PainterSurfmanDetailsMap::default();
         let WebGLComm {
             webgl_threads,
@@ -205,6 +214,7 @@ impl Paint {
             painters: Default::default(),
             paint_proxy: state.paint_proxy,
             event_loop_waker: state.event_loop_waker,
+            external_image_channel: state.external_image_channel,
             shutdown_state: state.shutdown_state,
             paint_receiver: state.receiver,
             embedder_to_constellation_sender: state.embedder_to_constellation_sender.clone(),
@@ -305,6 +315,11 @@ impl Paint {
 
     pub fn rendering_context_size(&self, painter_id: PainterId) -> Size2D<u32, DevicePixel> {
         self.painter(painter_id).rendering_context.size2d()
+    }
+
+    /// The textures the embedder wants pages to be able to display.
+    pub fn external_image_channel(&self) -> Arc<ExternalImageChannel> {
+        self.external_image_channel.clone()
     }
 
     pub fn webgl_threads(&self) -> WebGLThreads {

@@ -124,6 +124,7 @@ use layout_api::{LayoutFactory, ScriptThreadFactory};
 use log::{debug, error, info, trace, warn};
 use media::WindowGLContext;
 use net::image_cache::ImageCacheFactoryImpl;
+use paint_api::external_images::ExternalImageChannel;
 use net_traits::pub_domains::registered_domain_name;
 use net_traits::{self, AsyncRuntime, ResourceThreads, exit_fetch_thread, start_fetch_thread};
 use paint_api::{
@@ -537,6 +538,9 @@ pub struct InitialConstellationState {
     /// A channel through which messages can be sent to `Paint` in-process.
     pub paint_proxy: PaintProxy,
 
+    /// The textures the embedder wants pages to be able to display.
+    pub external_image_channel: Arc<ExternalImageChannel>,
+
     /// A channel to the developer tools, if applicable.
     pub devtools_sender: Option<Sender<DevtoolsControlMsg>>,
 
@@ -737,6 +741,7 @@ where
                     privileged_urls: state.privileged_urls,
                     image_cache_factory: Arc::new(ImageCacheFactoryImpl::new(
                         broken_image_icon_data,
+                        state.external_image_channel,
                     )),
                     pending_viewport_changes: Default::default(),
                     screenshot_readiness_requests: Vec::new(),

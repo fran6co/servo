@@ -34,6 +34,7 @@ use net::protocols::ProtocolRegistry;
 use net::resource_thread::new_resource_threads;
 use net_traits::{ResourceThreads, exit_fetch_thread, start_fetch_thread};
 use paint::{InitialPaintState, Paint};
+use paint_api::external_images::ExternalImageChannel;
 pub use paint_api::rendering_context::RenderingContext;
 use paint_api::{CrossProcessPaintApi, PaintMessage, PaintProxy};
 use profile::{mem as profile_mem, system_reporter, time as profile_time};
@@ -956,6 +957,7 @@ impl Servo {
             mem_profiler_chan: mem_profiler_chan.clone(),
             shutdown_state: shutdown_state.clone(),
             event_loop_waker: event_loop_waker.clone(),
+            external_image_channel: builder.external_image_channel,
             #[cfg(feature = "webxr")]
             webxr_registry: builder.webxr_registry,
         });
@@ -1215,6 +1217,7 @@ fn create_constellation(
 
     let initial_state = InitialConstellationState {
         paint_proxy,
+        external_image_channel: paint.external_image_channel(),
         embedder_proxy,
         constellation_to_embedder_proxy,
         devtools_sender,
@@ -1338,6 +1341,9 @@ pub fn run_content_process(token: String) {
                 layout_factory,
                 Arc::new(ImageCacheFactoryImpl::new(
                     new_event_loop_info.broken_image_icon_data,
+                    // The embedder's textures live in the process it renders with, so a content
+                    // process has none of them.
+                    ExternalImageChannel::new(),
                 )),
                 background_hang_monitor_register,
             );
@@ -1414,6 +1420,7 @@ pub struct ServoBuilder {
     preferences: Option<Box<Preferences>>,
     event_loop_waker: Box<dyn EventLoopWaker>,
     protocol_registry: ProtocolRegistry,
+    external_image_channel: Arc<ExternalImageChannel>,
     #[cfg(feature = "webxr")]
     webxr_registry: Box<dyn webxr::WebXrRegistry>,
 }
@@ -1425,6 +1432,7 @@ impl Default for ServoBuilder {
             preferences: Default::default(),
             event_loop_waker: Box::new(DefaultEventLoopWaker),
             protocol_registry: Default::default(),
+            external_image_channel: ExternalImageChannel::new(),
             #[cfg(feature = "webxr")]
             webxr_registry: Box::new(DefaultWebXrRegistry),
         }
@@ -1448,6 +1456,15 @@ impl ServoBuilder {
 
     pub fn event_loop_waker(mut self, event_loop_waker: Box<dyn EventLoopWaker>) -> Self {
         self.event_loop_waker = event_loop_waker;
+        self
+    }
+
+    /// The registry of textures the embedder wants pages to be able to display.
+    pub fn external_image_channel(
+        mut self,
+        external_image_channel: Arc<ExternalImageChannel>,
+    ) -> Self {
+        self.external_image_channel = external_image_channel;
         self
     }
 

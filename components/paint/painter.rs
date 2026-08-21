@@ -19,6 +19,7 @@ use image::RgbaImage;
 use log::{debug, error, info, warn};
 use media::WindowGLContext;
 use paint_api::display_list::{PaintDisplayListInfo, ScrollType};
+use paint_api::external_images::ExternalImageChannelHandler;
 use paint_api::largest_contentful_paint_candidate::LCPCandidate;
 use paint_api::rendering_context::RenderingContext;
 use paint_api::viewport_description::ViewportDescription;
@@ -178,6 +179,13 @@ impl Painter {
         );
 
         WindowGLContext::initialize_image_handler(&mut external_image_handlers);
+
+        external_image_handlers.set_handler(
+            Box::new(ExternalImageChannelHandler::new(
+                paint.external_image_channel.clone(),
+            )),
+            WebRenderImageHandlerType::Embedder,
+        );
 
         let embedder_to_constellation_sender = paint.embedder_to_constellation_sender.clone();
         let timer_refresh_driver = LazyCell::default();

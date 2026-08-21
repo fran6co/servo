@@ -28,7 +28,8 @@ use servo_base::generic_channel::GenericSharedMemory;
 pub use snapshot::*;
 use webrender_api::units::DeviceIntSize;
 use webrender_api::{
-    ImageDescriptor, ImageDescriptorFlags, ImageFormat as WebRenderImageFormat, ImageKey,
+    ExternalImageId, ImageDescriptor, ImageDescriptorFlags, ImageFormat as WebRenderImageFormat,
+    ImageKey,
 };
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, MallocSizeOf, PartialEq, Serialize)]
@@ -306,6 +307,10 @@ pub struct RasterImage {
     pub metadata: ImageMetadata,
     pub format: PixelFormat,
     pub id: Option<ImageKey>,
+    /// Set when the image content is a texture the embedder owns rather than pixels of our own, in
+    /// which case there are no `frames` and WebRender samples the texture directly.
+    #[ignore_malloc_size_of = "Defined in webrender_api"]
+    pub external_image_id: Option<ExternalImageId>,
     pub cors_status: CorsStatus,
     #[conditional_malloc_size_of]
     pub bytes: Arc<Vec<u8>>,
@@ -794,6 +799,7 @@ fn decode_static_image(
         height: rgba.height(),
     };
     Some(RasterImage {
+        external_image_id: None,
         metadata: ImageMetadata {
             width: rgba.width(),
             height: rgba.height(),
@@ -878,6 +884,7 @@ where
     }
 
     Some(RasterImage {
+        external_image_id: None,
         metadata: ImageMetadata { width, height },
         cors_status,
         frames,

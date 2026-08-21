@@ -32,8 +32,13 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use servo_base::id::{PipelineId, WebViewId};
 use servo_base::threadpool::ThreadPool;
 use servo_url::{ImmutableOrigin, ServoUrl};
+use paint_api::external_images::ExternalImageChannel;
 use webrender_api::ImageKey as WebRenderImageKey;
 use webrender_api::units::DeviceIntSize;
+use webrender_api::{
+    ExternalImageData, ExternalImageId, ExternalImageType, ImageBufferKind, ImageDescriptor,
+    ImageDescriptorFlags, ImageFormat as WebRenderImageFormat,
+};
 
 // We bake in rippy.png as a fallback, in case the embedder does not provide a broken
 // image icon resource. This version is 229 bytes, so don't exchange it against
@@ -88,6 +93,35 @@ fn parse_svg_document_in_memory(
         .map_err(|_| "Not a valid SVG document")
 }
 
+/// The content type a resource uses to say that its content is one of the embedder's textures,
+/// registered with an [`ExternalImageChannel`], rather than encoded image data.
+pub const EXTERNAL_IMAGE_CONTENT_TYPE: &str = "application/x-servo-external-image";
+
+/// The body of such a resource: the external image identifier and the size to sample it at, all
+/// little endian.
+fn parse_external_image(bytes: &[u8]) -> Option<RasterImage> {
+    if bytes.len() < 16 {
+        warn!("An external image resource needs 16 bytes, got {}", bytes.len());
+        return None;
+    }
+
+    let id = u64::from_le_bytes(bytes[0..8].try_into().ok()?);
+    let width = u32::from_le_bytes(bytes[8..12].try_into().ok()?);
+    let height = u32::from_le_bytes(bytes[12..16].try_into().ok()?);
+
+    Some(RasterImage {
+        metadata: ImageMetadata { width, height },
+        format: PixelFormat::BGRA8,
+        id: None,
+        external_image_id: Some(ExternalImageId(id)),
+        cors_status: CorsStatus::Safe,
+        bytes: Arc::new(Vec::new()),
+        frames: Vec::new(),
+        is_opaque: false,
+        loop_count: None,
+    })
+}
+
 fn decode_bytes_sync(
     key: LoadKey,
     bytes: &[u8],
@@ -95,6 +129,16 @@ fn decode_bytes_sync(
     content_type: Option<Mime>,
     fontdb: Arc<fontdb::Database>,
 ) -> DecoderMsg {
+    if content_type
+        .as_ref()
+        .is_some_and(|content_type| content_type.essence_str() == EXTERNAL_IMAGE_CONTENT_TYPE)
+    {
+        return DecoderMsg {
+            key,
+            image: parse_external_image(bytes).map(DecodedImage::Raster),
+        };
+    }
+
     let is_svg_document = content_type.is_some_and(|content_type| {
         (
             content_type.type_(),
@@ -121,10 +165,35 @@ fn decode_bytes_sync(
 
 fn set_webrender_image_key(
     paint_api: &CrossProcessPaintApi,
+    external_image_channel: &ExternalImageChannel,
     image: &mut RasterImage,
     image_key: WebRenderImageKey,
 ) {
     if image.id.is_some() {
+        return;
+    }
+
+    if let Some(external_image_id) = image.external_image_id {
+        let descriptor = ImageDescriptor {
+            format: WebRenderImageFormat::BGRA8,
+            size: DeviceIntSize::new(
+                image.metadata.width as i32,
+                image.metadata.height as i32,
+            ),
+            stride: None,
+            offset: 0,
+            flags: ImageDescriptorFlags::empty(),
+        };
+        let data = SerializableImageData::External(ExternalImageData {
+            id: external_image_id,
+            channel_index: 0,
+            image_type: ExternalImageType::TextureHandle(ImageBufferKind::Texture2D),
+            normalized_uvs: false,
+        });
+
+        paint_api.add_image(image_key, descriptor, data, false);
+        external_image_channel.bind(external_image_id.0, image_key, paint_api.clone());
+        image.id = Some(image_key);
         return;
     }
 
@@ -506,6 +575,10 @@ struct ImageCacheStore {
     /// Main struct to handle the cache of `WebRenderImageKey` and
     /// images that do not have a key yet.
     key_cache: KeyCache,
+
+    /// The textures the embedder wants pages to be able to display.
+    #[ignore_malloc_size_of = "Shared with the embedder"]
+    external_image_channel: Arc<ExternalImageChannel>,
 }
 
 impl ImageCacheStore {
@@ -523,7 +596,12 @@ impl ImageCacheStore {
                 if self.pending_loads.get_by_key_mut(&pending_id).is_none() {
                     return;
                 }
-                set_webrender_image_key(&self.paint_api, &mut raster_image, image_key);
+                set_webrender_image_key(
+                    &self.paint_api,
+                    &self.external_image_channel,
+                    &mut raster_image,
+                    image_key,
+                );
                 self.complete_load(pending_id, LoadResult::LoadedRasterImage(raster_image));
             },
             PendingKey::Svg((pending_id, mut raster_image, requested_size)) => {
@@ -535,7 +613,12 @@ impl ImageCacheStore {
                 {
                     return;
                 }
-                set_webrender_image_key(&self.paint_api, &mut raster_image, image_key);
+                set_webrender_image_key(
+                    &self.paint_api,
+                    &self.external_image_channel,
+                    &mut raster_image,
+                    image_key,
+                );
                 self.svg_rasterization_task_store
                     .remove_being_rasterized(pending_id, requested_size);
                 self.complete_load_svg(raster_image, pending_id, requested_size);
@@ -677,7 +760,7 @@ impl ImageCacheStore {
         };
 
         let completed_load = CompletedLoad::new(image_response.clone(), key);
-        self.completed_loads.insert(
+        let replaced = self.completed_loads.insert(
             (
                 pending_load.url,
                 pending_load.load_origin,
@@ -685,6 +768,21 @@ impl ImageCacheStore {
             ),
             completed_load,
         );
+
+        // A reload of the same resource replaces the entry; the key the replaced one bound to an
+        // embedder texture would otherwise keep being updated forever.
+        if let Some(replaced) = replaced {
+            if let ImageResponse::Loaded(Image::Raster(image), _) = &replaced.image_response {
+                if let (Some(image_key), Some(external_image_id)) =
+                    (image.id, image.external_image_id)
+                {
+                    self.external_image_channel
+                        .unbind(external_image_id.0, image_key);
+                    self.paint_api
+                        .update_images(self.webview_id.into(), [ImageUpdate::DeleteImage(image_key)].into());
+                }
+            }
+        }
 
         for listener in pending_load.listeners {
             listener.respond(image_response.clone());
@@ -783,10 +881,15 @@ pub struct ImageCacheFactoryImpl {
     /// A shared font database to be used by system fonts accessed when rasterizing vector
     /// images.
     fontdb: Arc<fontdb::Database>,
+    /// The textures the embedder wants pages to be able to display.
+    external_image_channel: Arc<ExternalImageChannel>,
 }
 
 impl ImageCacheFactoryImpl {
-    pub fn new(broken_image_icon_data: Vec<u8>) -> Self {
+    pub fn new(
+        broken_image_icon_data: Vec<u8>,
+        external_image_channel: Arc<ExternalImageChannel>,
+    ) -> Self {
         debug!("Creating new ImageCacheFactoryImpl");
         let mut fontdb = fontdb::Database::new();
         fontdb.load_system_fonts();
@@ -795,6 +898,7 @@ impl ImageCacheFactoryImpl {
             broken_image_icon_data: Arc::new(broken_image_icon_data),
             thread_pool: ThreadPool::global(),
             fontdb: Arc::new(fontdb),
+            external_image_channel,
         }
     }
 }
@@ -818,6 +922,7 @@ impl ImageCacheFactory for ImageCacheFactoryImpl {
                 webview_id,
                 key_cache: KeyCache::new(),
                 svg_rasterization_task_store: SvgRasterizationTaskStore::default(),
+                external_image_channel: self.external_image_channel.clone(),
             })),
             svg_id_image_id_map: Arc::new(Mutex::new(FxHashMap::default())),
             broken_image_icon_data: self.broken_image_icon_data.clone(),
@@ -1063,6 +1168,7 @@ impl ImageCache for ImageCacheImpl {
             };
 
             let rasterized_image = RasterImage {
+                external_image_id: None,
                 metadata: ImageMetadata {
                     width: tinyskia_requested_size.width(),
                     height: tinyskia_requested_size.height(),
@@ -1248,7 +1354,12 @@ impl ImageCache for ImageCacheImpl {
                     .paint_api
                     .generate_image_key_blocking(store.webview_id)
                     .expect("Could not generate image key for broken image icon");
-                set_webrender_image_key(&store.paint_api, &mut image, image_key);
+                set_webrender_image_key(
+                    &store.paint_api,
+                    &store.external_image_channel,
+                    &mut image,
+                    image_key,
+                );
                 Some(Arc::new(image))
             })
             .clone()
@@ -1258,6 +1369,19 @@ impl ImageCache for ImageCacheImpl {
 impl ImageCacheStore {
     /// Clear the image cache.
     fn clear(&mut self) {
+        // The documents that resolved resources to embedder textures are going away with their
+        // image keys, so the channel must stop updating those keys.
+        for load in self.completed_loads.values() {
+            if let ImageResponse::Loaded(Image::Raster(image), _) = &load.image_response {
+                if let (Some(image_key), Some(external_image_id)) =
+                    (image.id, image.external_image_id)
+                {
+                    self.external_image_channel
+                        .unbind(external_image_id.0, image_key);
+                }
+            }
+        }
+
         let deletions: smallvec::SmallVec<_> = self
             .completed_loads
             .values()

@@ -23,6 +23,7 @@ use surfman::{Adapter, Connection};
 use webrender_api::{DocumentId, FontVariation};
 
 pub mod display_list;
+pub mod external_images;
 pub mod largest_contentful_paint_candidate;
 pub mod rendering_context;
 pub mod viewport_description;
@@ -583,6 +584,8 @@ pub enum WebRenderImageHandlerType {
     WebGl,
     Media,
     WebGpu,
+    /// Textures the embedder owns and renders into itself.
+    Embedder,
 }
 
 /// List of WebRender external images to be shared among all external image
@@ -625,6 +628,8 @@ pub struct WebRenderExternalImageHandlers {
     media_handler: Option<Box<dyn WebRenderExternalImageApi>>,
     /// WebGPU handler.
     webgpu_handler: Option<Box<dyn WebRenderExternalImageApi>>,
+    /// Embedder handler.
+    embedder_handler: Option<Box<dyn WebRenderExternalImageApi>>,
     /// A [`WebRenderExternalImageIdManager`] responsible for creating new [`ExternalImageId`]s.
     /// This is shared with the WebGL, WebGPU, and hardware-accelerated media threads and
     /// all other instances of [`WebRenderExternalImageHandlers`] -- one per WebRender instance.
@@ -637,6 +642,7 @@ impl WebRenderExternalImageHandlers {
             webgl_handler: Default::default(),
             media_handler: Default::default(),
             webgpu_handler: Default::default(),
+            embedder_handler: Default::default(),
             id_manager,
         }
     }
@@ -654,6 +660,7 @@ impl WebRenderExternalImageHandlers {
             WebRenderImageHandlerType::WebGl => self.webgl_handler = Some(handler),
             WebRenderImageHandlerType::Media => self.media_handler = Some(handler),
             WebRenderImageHandlerType::WebGpu => self.webgpu_handler = Some(handler),
+            WebRenderImageHandlerType::Embedder => self.embedder_handler = Some(handler),
         }
     }
 }
@@ -703,6 +710,13 @@ impl ExternalImageHandler for WebRenderExternalImageHandlers {
                     source,
                 }
             },
+            WebRenderImageHandlerType::Embedder => {
+                let (source, size) = self.embedder_handler.as_mut().unwrap().lock(key.0);
+                ExternalImage {
+                    uv: TexelRect::new(0.0, size.height as f32, size.width as f32, 0.0),
+                    source,
+                }
+            },
         }
     }
 
@@ -716,6 +730,9 @@ impl ExternalImageHandler for WebRenderExternalImageHandlers {
         match handler_type {
             WebRenderImageHandlerType::WebGl => self.webgl_handler.as_mut().unwrap().unlock(key.0),
             WebRenderImageHandlerType::Media => self.media_handler.as_mut().unwrap().unlock(key.0),
+            WebRenderImageHandlerType::Embedder => {
+                self.embedder_handler.as_mut().unwrap().unlock(key.0)
+            },
             WebRenderImageHandlerType::WebGpu => {
                 self.webgpu_handler.as_mut().unwrap().unlock(key.0)
             },

@@ -6,9 +6,11 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use crossbeam_channel::Sender;
 use embedder_traits::{EventLoopWaker, ShutdownState};
+use paint_api::external_images::ExternalImageChannel;
 use paint_api::{PaintMessage, PaintProxy};
 use profile_traits::{mem, time};
 use servo_base::generic_channel::RoutedReceiver;
@@ -52,6 +54,8 @@ pub struct InitialPaintState {
     /// An [`EventLoopWaker`] used in order to wake up the embedder when it is
     /// time to paint.
     pub event_loop_waker: Box<dyn EventLoopWaker>,
+    /// The textures the embedder wants pages to be able to display.
+    pub external_image_channel: Arc<ExternalImageChannel>,
     /// If WebXR is enabled, a [`WebXrRegistry`] to register WebXR threads.
     #[cfg(feature = "webxr")]
     pub webxr_registry: Box<dyn WebXrRegistry>,

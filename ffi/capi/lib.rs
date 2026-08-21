@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+mod external_images;
 mod frame;
 mod input;
 mod options;
@@ -37,6 +38,7 @@ pub struct ServoBuilder {
     event_loop_waker: ServoEventLoopWaker,
     preferences: Option<Box<ServoPreferences>>,
     protocol_registry: servo_api::protocol_handler::ProtocolRegistry,
+    external_images: Option<std::sync::Arc<servo_api::ExternalImageChannel>>,
 }
 
 /// A callback used by Servo to wake the embedder thread when
@@ -235,6 +237,10 @@ pub unsafe extern "C" fn servo_builder_build(builder: *mut ServoBuilder) -> *mut
     rust_builder = rust_builder.event_loop_waker(Box::new(builder.event_loop_waker));
     rust_builder = rust_builder.protocol_registry(std::mem::take(&mut builder.protocol_registry));
 
+    if let Some(external_images) = builder.external_images.take() {
+        rust_builder = rust_builder.external_image_channel(external_images);
+    }
+
     let servo = rust_builder.build();
     Box::into_raw(Box::new(servo))
 }
@@ -303,5 +309,37 @@ pub unsafe extern "C" fn servo_builder_add_protocol_handler(
         protocol::CallbackProtocolHandler::new(callback, user_data),
     ) {
         log::error!("Could not register a handler for the {scheme} scheme: {error:?}");
+    }
+}
+
+/// Sets the registry of textures that pages loaded by this `Servo` instance can display.
+///
+/// `external_images` is a handle from `servo_external_images_create`. The ownership of it remains
+/// with the caller, who goes on using it to register textures and must keep it alive for as long as
+/// the `Servo` instance.
+///
+/// # Safety
+///
+/// The caller must ensure that:
+///
+/// - `builder` is a non-null pointer to a `ServoBuilder` previously returned by
+///   `servo_builder_create` and not yet freed nor passed to another API that takes ownership of it.
+/// - `external_images` is a non-null pointer previously returned by
+///   `servo_external_images_create` and not yet freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn servo_builder_set_external_images(
+    builder: *mut ServoBuilder,
+    external_images: *mut external_images::ExternalImages,
+) {
+    assert!(!builder.is_null(), "builder pointer must not be null");
+    assert!(
+        !external_images.is_null(),
+        "external_images pointer must not be null"
+    );
+
+    // SAFETY: The caller is assumed to uphold the safety requirements for `builder` and
+    // `external_images` documented above.
+    unsafe {
+        (*builder).external_images = Some((*external_images).inner.clone());
     }
 }
