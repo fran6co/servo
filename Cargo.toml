@@ -421,6 +421,7 @@ codegen-units = 1
 
 [patch.crates-io]
 surfman = { git = "https://github.com/fran6co/surfman", rev = "61ce271627948448353f9f7cb14406bcde162836" }
+mozangle = { git = "https://github.com/fran6co/mozangle", rev = "7809d2042dd9d9f884193eb9c2808abf9fdcbde1" }
 # If you need to temporarily test Servo with a local fork of some upstream
 # crate, add that here. Use the form:
 #
