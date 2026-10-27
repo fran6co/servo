@@ -900,6 +900,16 @@ impl Paint {
             .request_screenshot(webview_id, rect, callback);
     }
 
+    /// See [`Painter::wait_for_up_to_date_frame`].
+    pub fn wait_for_up_to_date_frame(
+        &self,
+        webview_id: WebViewId,
+        callback: Box<dyn FnOnce(Result<(), ScreenshotCaptureError>) + 'static>,
+    ) {
+        self.painter(webview_id.into())
+            .wait_for_up_to_date_frame(webview_id, callback);
+    }
+
     pub fn notify_input_event_handled(
         &self,
         webview_id: WebViewId,

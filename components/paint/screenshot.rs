@@ -20,8 +20,26 @@ use crate::painter::Painter;
 pub(crate) struct ScreenshotRequest {
     webview_id: WebViewId,
     rect: Option<DeviceRect>,
-    callback: Box<dyn FnOnce(Result<RgbaImage, ScreenshotCaptureError>) + 'static>,
+    callback: ScreenshotCallback,
     phase: ScreenshotRequestPhase,
+}
+
+/// What a request is answered with once the rendering reflects the finished state.
+pub(crate) enum ScreenshotCallback {
+    /// A copy of the rendering.
+    Image(Box<dyn FnOnce(Result<RgbaImage, ScreenshotCaptureError>) + 'static>),
+    /// Only that the frame just painted reflects it, for an embedder that presents the frame
+    /// itself instead of copying it.
+    UpToDateFrame(Box<dyn FnOnce(Result<(), ScreenshotCaptureError>) + 'static>),
+}
+
+impl ScreenshotCallback {
+    fn fail(self, error: ScreenshotCaptureError) {
+        match self {
+            ScreenshotCallback::Image(callback) => callback(Err(error)),
+            ScreenshotCallback::UpToDateFrame(callback) => callback(Err(error)),
+        }
+    }
 }
 
 /// Screenshots requests happen in three phases:
@@ -68,7 +86,7 @@ impl ScreenshotTaker {
         &self,
         webview_id: WebViewId,
         rect: Option<DeviceRect>,
-        callback: Box<dyn FnOnce(Result<RgbaImage, ScreenshotCaptureError>) + 'static>,
+        callback: ScreenshotCallback,
     ) {
         self.requests.borrow_mut().push(ScreenshotRequest {
             webview_id,
@@ -173,12 +191,20 @@ impl ScreenshotTaker {
                     return Some(screenshot_request);
                 }
 
-                let callback = screenshot_request.callback;
                 let Some(webview_renderer) =
                     renderer.webview_renderer(screenshot_request.webview_id)
                 else {
-                    callback(Err(ScreenshotCaptureError::WebViewDoesNotExist));
+                    screenshot_request
+                        .callback
+                        .fail(ScreenshotCaptureError::WebViewDoesNotExist);
                     return None;
+                };
+                let callback = match screenshot_request.callback {
+                    ScreenshotCallback::Image(callback) => callback,
+                    ScreenshotCallback::UpToDateFrame(callback) => {
+                        callback(Ok(()));
+                        return None;
+                    },
                 };
 
                 let viewport_rect = webview_renderer.rect.to_i32();

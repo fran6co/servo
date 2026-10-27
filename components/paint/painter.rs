@@ -62,7 +62,7 @@ use crate::Paint;
 use crate::paint::{RepaintReason, WebRenderDebugOption};
 use crate::refresh_driver::{AnimationRefreshDriverObserver, BaseRefreshDriver};
 use crate::render_notifier::RenderNotifier;
-use crate::screenshot::ScreenshotTaker;
+use crate::screenshot::{ScreenshotCallback, ScreenshotTaker};
 use crate::web_content_animation::WebContentAnimator;
 #[cfg(feature = "webgl")]
 use crate::webrender_external_images::WebGLExternalImages;
@@ -1473,8 +1473,33 @@ impl Painter {
         };
 
         let rect = rect.map(|rect| rect.as_device_rect(webview.device_pixels_per_page_pixel()));
-        self.screenshot_taker
-            .request_screenshot(webview_id, rect, callback);
+        self.screenshot_taker.request_screenshot(
+            webview_id,
+            rect,
+            ScreenshotCallback::Image(callback),
+        );
+        self.send_to_constellation(EmbedderToConstellationMessage::RequestScreenshotReadiness(
+            webview_id,
+        ));
+    }
+
+    /// Calls `callback` from the paint whose frame reflects everything sent to the `WebView`'s
+    /// pipelines before this request, as a screenshot would, but without reading the frame back.
+    pub(crate) fn wait_for_up_to_date_frame(
+        &self,
+        webview_id: WebViewId,
+        callback: Box<dyn FnOnce(Result<(), ScreenshotCaptureError>) + 'static>,
+    ) {
+        if !self.webview_renderers.contains_key(&webview_id) {
+            callback(Err(ScreenshotCaptureError::WebViewDoesNotExist));
+            return;
+        }
+
+        self.screenshot_taker.request_screenshot(
+            webview_id,
+            None,
+            ScreenshotCallback::UpToDateFrame(callback),
+        );
         self.send_to_constellation(EmbedderToConstellationMessage::RequestScreenshotReadiness(
             webview_id,
         ));
