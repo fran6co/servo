@@ -777,6 +777,22 @@ impl WebView {
             .request_screenshot(self.id(), rect, Box::new(callback));
     }
 
+    /// Asynchronously wait for a frame of the [`WebView`] that reflects everything sent to it
+    /// before this call, such as evaluated scripts, under the same conditions as
+    /// [`WebView::take_screenshot`], but without reading the frame back. This allows an embedder
+    /// that presents the rendering itself to present exactly that frame.
+    ///
+    /// The provided `callback` is called from the paint whose frame reflects that state, so
+    /// presenting right after that paint shows it.
+    pub fn wait_for_up_to_date_frame(
+        &self,
+        callback: impl FnOnce(Result<(), ScreenshotCaptureError>) + 'static,
+    ) {
+        self.servo()
+            .paint()
+            .wait_for_up_to_date_frame(self.id(), Box::new(callback));
+    }
+
     pub(crate) fn set_history(self, new_back_forward_list: Vec<ServoUrl>, new_index: usize) {
         {
             let mut inner_mut = self.inner_mut();
