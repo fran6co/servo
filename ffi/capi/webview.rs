@@ -483,6 +483,76 @@ pub unsafe extern "C" fn servo_webview_take_screenshot(
     });
 }
 
+/// Asynchronously waits for a frame of the `WebView` that reflects everything
+/// sent to it before this call, such as evaluated scripts, under the same
+/// conditions as `servo_webview_take_screenshot`, but without reading the
+/// frame back. This allows an embedder that presents the rendering itself to
+/// present exactly that frame.
+///
+/// `webview` is a handle to a `WebView` object.
+/// The ownership of `webview` remains with the caller after the call.
+///
+/// `callback` is a function pointer that will be invoked at most once, from
+/// the `servo_webview_paint` whose frame reflects that state, so presenting
+/// right after that paint shows it. The callback is invoked asynchronously on
+/// the embedder thread that runs `servo_spin_event_loop`.
+///
+/// The callback receives:
+/// - `ready`: whether the frame is ready. If false, the frame will never be.
+/// - `error`: error code represented by one of the
+///            `SERVO_SCREENSHOT_CAPTURE_ERROR_*` constants.
+///            Only valid when `ready` is false.
+/// - `user_data`: the user data pointer that was passed to
+///                `servo_webview_wait_for_up_to_date_frame`.
+///
+/// `user_data` is an opaque pointer that is passed to `callback` when it is invoked.
+///  The ownership and validity of `user_data` is the caller's responsibility.
+///
+/// # Safety
+///
+/// The caller must ensure that:
+///
+/// - `webview` is a non-null pointer to a `WebView` previously returned
+///   by `servo_webview_builder_build` and not yet passed to
+///   `servo_webview_free`. No other code may read or write `*webview`
+///   for the duration of this call.
+/// - If `callback` is not null, it is a valid C ABI function matching
+///   the exact signature shown, remains valid until it is invoked or
+///   the `WebView` is freed, and does not unwind across the FFI
+///   boundary.
+/// - `user_data` is either null or remains valid until `callback` is
+///   invoked or the `WebView` is freed.
+/// - The call is made from the same thread that originally created the
+///   `WebView` via `servo_webview_builder_build`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn servo_webview_wait_for_up_to_date_frame(
+    webview: *mut WebView,
+    callback: Option<unsafe extern "C" fn(ready: bool, error: i32, user_data: *mut c_void)>,
+    user_data: *mut c_void,
+) {
+    assert!(!webview.is_null(), "webview pointer must not be null");
+
+    // SAFETY: The caller is assumed to uphold the safety requirements
+    // for `webview` documented above.
+    let webview = unsafe { &*webview };
+
+    let Some(callback) = callback else {
+        return;
+    };
+
+    webview.wait_for_up_to_date_frame(move |result| {
+        let (ready, error_code) = match result {
+            Ok(()) => (true, 0),
+            Err(error) => (false, error as _),
+        };
+        // SAFETY: The caller is assumed to uphold the safety
+        // requirements for `callback` documented above.
+        unsafe {
+            callback(ready, error_code, user_data);
+        }
+    });
+}
+
 /// Destroys the `WebView` instance and frees its memory.
 ///
 /// `webview` is a handle to a `WebView` object.

@@ -5,6 +5,7 @@
 unsafe extern "C" {
     fn run_c_api_tests() -> i32;
     fn run_c_integration_tests() -> i32;
+    fn run_c_up_to_date_frame_tests() -> i32;
 }
 
 pub fn c_api_tests() {
@@ -15,4 +16,9 @@ pub fn c_api_tests() {
 pub fn c_integration_tests() {
     let result = unsafe { run_c_integration_tests() };
     assert_eq!(result, 0, "C integration tests failed");
+}
+
+pub fn c_up_to_date_frame_tests() {
+    let result = unsafe { run_c_up_to_date_frame_tests() };
+    assert_eq!(result, 0, "C up-to-date frame tests failed");
 }
