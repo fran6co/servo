@@ -376,6 +376,12 @@ impl Painter {
             return false;
         }
 
+        // A paint for a screenshot does not wait for the next frame, as one in between frames
+        // does not advance animations.
+        if repaint_reason.contains(RepaintReason::ReadyForScreenshot) {
+            return true;
+        }
+
         !self.refresh_driver.wait_to_paint()
     }
 
@@ -1529,13 +1535,11 @@ impl Painter {
             self.set_needs_repaint(RepaintReason::NewWebRenderFrame);
         }
 
-        // If we received a new frame and a repaint isn't necessary, it may be that this
-        // is the last frame that was pending. In that case, trigger a manual repaint so
-        // that the screenshot can be taken at the end of the repaint procedure.
-        if !repaint_needed {
-            self.screenshot_taker
-                .maybe_trigger_paint_for_screenshot(self);
-        }
+        // It may be that this is the last frame that was pending. In that case, ask for a
+        // repaint so that the screenshot can be taken at the end of the repaint procedure,
+        // which does not wait for the next frame like the repaint for this frame does.
+        self.screenshot_taker
+            .maybe_trigger_paint_for_screenshot(self);
     }
 
     pub(crate) fn webviews_needing_repaint(&self) -> Vec<WebViewId> {

@@ -1367,6 +1367,26 @@ fn test_frame_start_after_paints_asks_for_a_paint() {
 }
 
 #[test]
+fn test_screenshot_does_not_wait_for_frame_start() {
+    let servo_test = ServoTest::new();
+    let refresh_driver = Rc::new(ManualRefreshDriver::default());
+    let delegate = Rc::new(WebViewDelegateImpl::default());
+    let webview = animating_webview(&servo_test, refresh_driver, delegate);
+    frames_run_over_paints(&servo_test, &webview);
+
+    // Only painting when servo asks, as frames never start.
+    let screenshot = Rc::new(Cell::new(false));
+    let taken = screenshot.clone();
+    webview.take_screenshot(None, move |result| {
+        assert!(result.is_ok());
+        taken.set(true);
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    servo_test.spin(|| !screenshot.get() && std::time::Instant::now() < deadline);
+    assert!(screenshot.get());
+}
+
+#[test]
 fn test_about_memory_page_loads() {
     let servo_test = ServoTest::new();
     let delegate = Rc::new(WebViewDelegateImpl::default());
