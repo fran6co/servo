@@ -62,10 +62,14 @@ impl BaseRefreshDriver {
     }
 
     pub(crate) fn notify_will_paint(&self, painter: &mut Painter) {
+        // A paint while still waiting for the frame to start happens for some other reason,
+        // such as input or an embedder that paints when it needs to.
+        let frame_start = !self.waiting_for_frame.load(Ordering::Relaxed);
+
         // Limit the borrow of `self.observers` to the minimum here.
         let still_has_observers = {
             let mut observers = self.observers.borrow_mut();
-            observers.retain(|observer| observer.frame_started(painter));
+            observers.retain(|observer| observer.frame_started(painter, frame_start));
             !observers.is_empty()
         };
 
@@ -98,10 +102,11 @@ impl BaseRefreshDriver {
 /// animation frames right after vsync signals or one that handles touch interactions once
 /// per frame.
 pub(crate) trait RefreshDriverObserver {
-    /// Informs the observer that a new frame has started. The observer should return
-    /// `true` to keep observing or `false` if wants to stop observing and should be
-    /// removed by the [`BaseRefreshDriver`].
-    fn frame_started(&self, painter: &mut Painter) -> bool;
+    /// Informs the observer that a paint is about to happen, which is for a new frame when
+    /// `frame_start` is true, and otherwise for some other reason while still waiting for the
+    /// next frame. The observer should return `true` to keep observing or `false` if wants to
+    /// stop observing and should be removed by the [`BaseRefreshDriver`].
+    fn frame_started(&self, painter: &mut Painter, frame_start: bool) -> bool;
 }
 
 /// The [`AnimationRefreshDriverObserver`] is the default implementation of a
@@ -114,6 +119,10 @@ pub(crate) struct AnimationRefreshDriverObserver {
 
     /// Whether or not we are currently animating via a timer.
     pub(crate) animating: Cell<bool>,
+
+    /// Whether a paint in between frame starts left the animations where they were, so that
+    /// the paint after the next frame start has to advance them.
+    skipped_tick: Cell<bool>,
 }
 
 impl AnimationRefreshDriverObserver {
@@ -121,7 +130,14 @@ impl AnimationRefreshDriverObserver {
         Self {
             constellation_sender,
             animating: Default::default(),
+            skipped_tick: Default::default(),
         }
+    }
+
+    /// Whether a paint left the animations where they were since the last call, which then
+    /// needs another paint once the next frame starts.
+    pub(crate) fn take_skipped_tick(&self) -> bool {
+        self.skipped_tick.take()
     }
 
     pub(crate) fn notify_animation_state_changed(
@@ -153,7 +169,14 @@ impl AnimationRefreshDriverObserver {
 }
 
 impl RefreshDriverObserver for AnimationRefreshDriverObserver {
-    fn frame_started(&self, painter: &mut Painter) -> bool {
+    fn frame_started(&self, painter: &mut Painter, frame_start: bool) -> bool {
+        // Animations advance once per frame, rather than on every paint, such as ones for input.
+        // Keep observing, so that the paint after the next frame start advances them.
+        if !frame_start {
+            self.skipped_tick.set(true);
+            return true;
+        }
+
         // If any WebViews are animating ask them to paint again for another animation tick.
         let animating_webviews = painter.animating_webviews();
 

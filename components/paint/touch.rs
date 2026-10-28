@@ -869,7 +869,7 @@ pub(crate) struct FlingRefreshDriverObserver {
 }
 
 impl RefreshDriverObserver for FlingRefreshDriverObserver {
-    fn frame_started(&self, painter: &mut Painter) -> bool {
+    fn frame_started(&self, painter: &mut Painter, _frame_start: bool) -> bool {
         painter
             .webview_renderer_mut(self.webview_id)
             .is_some_and(WebViewRenderer::update_touch_handling_at_new_frame_start)

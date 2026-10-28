@@ -440,6 +440,11 @@ impl Painter {
         // the scene no longer needs to be repainted.
         self.needs_repaint.set(RepaintReason::empty());
 
+        // Unless this paint left animations for the next frame start, which needs a paint.
+        if self.animation_refresh_driver_observer.take_skipped_tick() {
+            self.set_needs_repaint(RepaintReason::ChangedAnimationState);
+        }
+
         self.screenshot_taker.maybe_take_screenshots(self);
         self.send_pending_paint_metrics_messages_after_composite();
     }
