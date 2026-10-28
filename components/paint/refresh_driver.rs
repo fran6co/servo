@@ -62,6 +62,12 @@ impl BaseRefreshDriver {
     }
 
     pub(crate) fn notify_will_paint(&self, painter: &mut Painter) {
+        // A paint while still waiting for the frame to start, such as one the embedder asked for, is
+        // not a new frame for the observers.
+        if self.waiting_for_frame.load(Ordering::Relaxed) {
+            return;
+        }
+
         // Limit the borrow of `self.observers` to the minimum here.
         let still_has_observers = {
             let mut observers = self.observers.borrow_mut();
